@@ -142,14 +142,21 @@ func (p *pool) tick() {
 	}
 }
 
-// drain 整池排空：不再接收新流量，等待在途请求完成或排空超时后回收全部实例。
-func (p *pool) drain() {
+// markDraining 原子地将池标记为排空（不再接收新流量）。
+// 必须在 Function.mu 保护下与权重变更一起序列化调用。返回是否为本调用新标记。
+func (p *pool) markDraining() bool {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.draining {
-		p.mu.Unlock()
-		return
+		return false
 	}
 	p.draining = true
+	return true
+}
+
+// drain 等待在途请求完成或排空超时，然后回收全部实例。调用前须已 markDraining。
+func (p *pool) drain() {
+	p.mu.Lock()
 	ins := append([]*instance(nil), p.instances...)
 	p.mu.Unlock()
 

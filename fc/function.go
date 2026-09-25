@@ -174,9 +174,10 @@ func (f *Function) applyTrafficLocked(weights map[RevisionID]int) error {
 		}
 	}
 
-	// 失去流量的版本：异步排空，不影响其他版本。
+	// 失去流量的版本：在同一把锁下标记排空（与权重变更、流量恢复序列化），
+	// 再异步等待在途请求完成，不影响其他版本。
 	for id, p := range f.pools {
-		if f.weights[id] == 0 {
+		if f.weights[id] == 0 && p.markDraining() {
 			go p.drain()
 		}
 	}
@@ -253,6 +254,7 @@ func (f *Function) Close() {
 	_, pools := f.snapshot()
 	var wg sync.WaitGroup
 	for _, p := range pools {
+		p.markDraining()
 		wg.Add(1)
 		go func(p *pool) { defer wg.Done(); p.drain() }(p)
 	}

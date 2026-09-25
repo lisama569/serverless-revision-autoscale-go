@@ -10,9 +10,9 @@ import (
 type instanceState int
 
 const (
-	stateActive instanceState = iota
-	stateDraining // 不再接收新流量，等待在途请求完成
-	stateDead     // 已回收
+	stateActive   instanceState = iota
+	stateDraining               // 不再接收新流量，等待在途请求完成
+	stateDead                   // 已回收
 )
 
 func (s instanceState) String() string {
@@ -39,21 +39,24 @@ type instance struct {
 	sem      chan struct{} // 容量 = MaxConcurrency
 	lastIdle time.Time
 
-	drainCtx context.Context // 排空超时上下文；未排空时为 background
-	drained  chan struct{}   // 排空开始且在途归零后关闭
+	drainCtx    context.Context    // 实例级排空上下文，创建即建立
+	drainCancel context.CancelFunc // 排空超时时取消，中断在途调用
+	drained     chan struct{}      // 排空开始且在途归零后关闭
 }
 
 func newInstance(id string, rev *Revision, log Logger, now func() time.Time) *instance {
+	dctx, cancel := context.WithCancel(context.Background())
 	in := &instance{
-		id:       id,
-		rev:      rev,
-		log:      log,
-		now:      now,
-		state:    stateActive,
-		sem:      make(chan struct{}, rev.Config.MaxConcurrency),
-		lastIdle: now(),
-		drainCtx: context.Background(),
-		drained:  make(chan struct{}),
+		id:          id,
+		rev:         rev,
+		log:         log,
+		now:         now,
+		state:       stateActive,
+		sem:         make(chan struct{}, rev.Config.MaxConcurrency),
+		lastIdle:    now(),
+		drainCtx:    dctx,
+		drainCancel: cancel,
+		drained:     make(chan struct{}),
 	}
 	log("[instance %s] created for revision %s", id, rev.ID)
 	return in
@@ -98,19 +101,25 @@ func (in *instance) closeDrainedLocked() {
 	}
 }
 
-// startDrain 停止接收新流量；drainCtx 到期表示排空超时。
+// startDrain 停止接收新流量；drainCtx 到期表示排空超时，
+// 超时通过实例级 drainCtx 取消传播给所有在途 exec（含已开始执行的）。
 func (in *instance) startDrain(drainCtx context.Context) {
 	in.mu.Lock()
-	defer in.mu.Unlock()
 	if in.state == stateDead {
+		in.mu.Unlock()
 		return
 	}
 	in.state = stateDraining
-	in.drainCtx = drainCtx
 	if in.inflight == 0 {
 		in.closeDrainedLocked()
 	}
 	in.log("[instance %s] draining (rev %s, inflight=%d)", in.id, in.rev.ID, in.inflight)
+	in.mu.Unlock()
+
+	go func() {
+		<-drainCtx.Done()
+		in.drainCancel()
+	}()
 }
 
 // kill 由缩容回收调用：要求实例无在途请求。
@@ -138,14 +147,10 @@ func (in *instance) exec(ctx context.Context, req *Request) (string, error) {
 		done <- result{body, err}
 	}()
 
-	in.mu.Lock()
-	drainCtx := in.drainCtx
-	in.mu.Unlock()
-
 	select {
 	case r := <-done:
 		return r.body, r.err
-	case <-drainCtx.Done():
+	case <-in.drainCtx.Done():
 		cancel() // 通知 handler 尽快退出
 		return "", newError(ErrKindDrainTimeout,
 			"instance "+in.id+" drain deadline exceeded while request in flight")
