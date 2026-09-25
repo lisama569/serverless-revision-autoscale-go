@@ -192,3 +192,9 @@ func (p *pool) stats() PoolStats {
 	}
 	return s
 }
+
+func (p *pool) isDraining() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.draining
+}

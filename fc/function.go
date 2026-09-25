@@ -166,6 +166,14 @@ func (f *Function) applyTrafficLocked(weights map[RevisionID]int) error {
 	}
 	f.log("[function %s] traffic updated (epoch=%d): %v", f.name, f.epoch+1, f.weights)
 
+	// 重新获得流量的版本若池正在排空，重建新池（旧池继续排空，互不影响）。
+	for id, w := range f.weights {
+		if w > 0 && f.pools[id].isDraining() {
+			f.pools[id] = newPool(f.revisions[id], f.log, f.now)
+			f.log("[function %s] revision %s regained traffic: fresh pool created", f.name, id)
+		}
+	}
+
 	// 失去流量的版本：异步排空，不影响其他版本。
 	for id, p := range f.pools {
 		if f.weights[id] == 0 {
