@@ -10,6 +10,7 @@ const (
 	ErrKindInvalidWeight   ErrorKind = "invalid_weight"             // 权重非法（负数、全零、总和超限等）
 	ErrKindUnknownRevision ErrorKind = "unknown_revision"           // 权重指向不存在的版本
 	ErrKindConflict        ErrorKind = "concurrent_update_conflict" // 与并发发布/回滚冲突（epoch 不匹配）
+	ErrKindNoTraffic       ErrorKind = "no_traffic"                 // 函数当前没有任何流量配置
 
 	// 数据面背压与生命周期错误
 	ErrKindQueueFull      ErrorKind = "backpressure_queue_full" // 排队队列已满，请求被拒绝
