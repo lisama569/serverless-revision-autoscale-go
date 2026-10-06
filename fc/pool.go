@@ -119,26 +119,37 @@ func (p *pool) tryGet() (in *instance, full bool, err error) {
 	return nil, true, nil
 }
 
-// tick 回收空闲超时的实例（可缩到零）。
+// tick 回收空闲超时的实例（保底 MinInstances 个；默认 MinInstances=0 可缩到零）。
 func (p *pool) tick() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.now()
-	keep := p.instances[:0]
+	kept := make([]*instance, 0, len(p.instances))
 	for _, in := range p.instances {
 		in.mu.Lock()
 		idle := in.inflight == 0 && now.Sub(in.lastIdle) >= p.rev.Config.IdleTimeout
 		in.mu.Unlock()
+		// 保底：回收后存活数不得低于 MinInstances；超出保底的空闲实例照常回收。
+		floor := p.rev.Config.MinInstances
+		if p.draining {
+			floor = 0 // 版本已彻底摘除流量：保底实例同样收走
+		}
+		if idle && len(kept) < floor {
+			idle = false
+		}
 		if idle {
 			in.kill()
-			p.log("[pool %s] scale-down: reclaim %s, instances=%d", p.rev.ID, in.id, len(p.instances)-1)
+			p.log("[pool %s] scale-down: reclaim %s, instances=%d", p.rev.ID, in.id, len(p.instances)-len(kept)-1)
 		} else {
-			keep = append(keep, in)
+			kept = append(kept, in)
 		}
 	}
-	p.instances = keep
+	p.instances = kept
 	if len(p.instances) == 0 {
 		p.log("[pool %s] scaled to zero", p.rev.ID)
+	} else if len(p.instances) <= p.rev.Config.MinInstances && p.rev.Config.MinInstances > 0 {
+		p.log("[pool %s] scale-down stopped at min-instances floor: instances=%d (min=%d)",
+			p.rev.ID, len(p.instances), p.rev.Config.MinInstances)
 	}
 }
 
@@ -204,4 +215,24 @@ func (p *pool) isDraining() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.draining
+}
+
+// ensureMin 保底预热：将 active 实例数补到 MinInstances。
+// 仅在版本仍承接（或即将承接）流量时由 Function 在锁内调用；排空池不预热。
+func (p *pool) ensureMin() {
+	want := p.rev.Config.MinInstances
+	if want <= 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.draining {
+		return
+	}
+	for len(p.instances) < want {
+		p.nextID++
+		n := newInstance(fmt.Sprintf("%s-i%d", p.rev.ID, p.nextID), p.rev, p.log, p.now)
+		p.instances = append(p.instances, n)
+		p.log("[pool %s] min-instances warm-up: instances=%d (min=%d)", p.rev.ID, len(p.instances), want)
+	}
 }

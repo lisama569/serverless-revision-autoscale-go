@@ -9,7 +9,7 @@ import (
 // TestGracefulDrain 排空中的实例不再接收新流量，但在途请求必须完成；
 // 同函数其他版本流量不受影响。
 func TestGracefulDrain(t *testing.T) {
-	f := NewFunction("fn", t.Logf)
+	f := newTestFunction(t)
 	release := make(chan struct{})
 	v1Handler := func(ctx context.Context, req *Request) (string, error) {
 		<-release
@@ -80,7 +80,7 @@ func TestGracefulDrain(t *testing.T) {
 
 // TestDrainTimeout 排空超时与调用超时、上游取消可区分。
 func TestDrainTimeout(t *testing.T) {
-	f := NewFunction("fn", t.Logf)
+	f := newTestFunction(t)
 	block := func(ctx context.Context, req *Request) (string, error) {
 		<-ctx.Done() // 永不主动完成，等取消
 		return "", ctx.Err()
@@ -120,7 +120,7 @@ func TestDrainTimeout(t *testing.T) {
 
 // TestTimeoutClassification 调用超时与上游取消可区分。
 func TestTimeoutClassification(t *testing.T) {
-	f := NewFunction("fn", t.Logf)
+	f := newTestFunction(t)
 	block := func(ctx context.Context, req *Request) (string, error) {
 		<-ctx.Done()
 		return "", ctx.Err()

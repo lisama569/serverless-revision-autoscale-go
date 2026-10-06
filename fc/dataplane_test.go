@@ -27,7 +27,7 @@ func (c *fakeClock) Advance(d time.Duration) {
 
 // TestWeightDistribution 权重切换整体生效，流量分布确定可重复。
 func TestWeightDistribution(t *testing.T) {
-	f := NewFunction("fn", t.Logf)
+	f := newTestFunction(t)
 	v1, _ := f.Publish(okHandler("v1"), RevisionConfig{}, map[RevisionID]int{"": 1}, 0)
 	v2, err := f.Publish(okHandler("v2"), RevisionConfig{}, nil, f.Epoch())
 	if err != nil {
@@ -57,7 +57,7 @@ func TestWeightDistribution(t *testing.T) {
 // TestScaleToZeroAndColdStart 无流量缩容到零，新请求到来时重新拉起。
 func TestScaleToZeroAndColdStart(t *testing.T) {
 	clock := newFakeClock()
-	f := NewFunction("fn", t.Logf)
+	f := newTestFunction(t)
 	f.now = clock.Now
 
 	v1, err := f.Publish(okHandler("v1"), RevisionConfig{IdleTimeout: time.Minute}, map[RevisionID]int{"": 1}, 0)
@@ -106,7 +106,7 @@ func TestScaleToZeroAndColdStart(t *testing.T) {
 
 // TestBackpressure 超出并发上限的请求排队，队列满后以可区分原因拒绝。
 func TestBackpressure(t *testing.T) {
-	f := NewFunction("fn", t.Logf)
+	f := newTestFunction(t)
 	release := make(chan struct{})
 	handler := func(ctx context.Context, req *Request) (string, error) {
 		<-release

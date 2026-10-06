@@ -12,7 +12,7 @@ func okHandler(body string) Handler {
 
 // TestPublishValidation 非法权重与不存在的版本必须被明确拒绝，且无副作用。
 func TestPublishValidation(t *testing.T) {
-	f := NewFunction("fn", t.Logf)
+	f := newTestFunction(t)
 
 	v1, err := f.Publish(okHandler("v1"), RevisionConfig{}, map[RevisionID]int{"": 1}, 0)
 	if err != nil {
@@ -49,7 +49,7 @@ func TestPublishValidation(t *testing.T) {
 
 // TestConcurrentPublishConflict 并发发布/回滚只有一个能成功，其余被纪元冲突拒绝。
 func TestConcurrentPublishConflict(t *testing.T) {
-	f := NewFunction("fn", t.Logf)
+	f := newTestFunction(t)
 	if _, err := f.Publish(okHandler("v1"), RevisionConfig{}, map[RevisionID]int{"": 1}, 0); err != nil {
 		t.Fatalf("publish v1: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestConcurrentPublishConflict(t *testing.T) {
 
 // TestRollbackAtomic 回滚整体生效：回滚后全部流量指向目标版本。
 func TestRollbackAtomic(t *testing.T) {
-	f := NewFunction("fn", t.Logf)
+	f := newTestFunction(t)
 	v1, _ := f.Publish(okHandler("v1"), RevisionConfig{}, map[RevisionID]int{"": 1}, 0)
 	v2, err := f.Publish(okHandler("v2"), RevisionConfig{}, map[RevisionID]int{"": 1}, f.Epoch())
 	if err != nil {
@@ -121,7 +121,7 @@ func TestRollbackAtomic(t *testing.T) {
 
 // TestRollbackConflictWithPublish 回滚与并发发布冲突时必须有一方被拒绝。
 func TestRollbackConflictWithPublish(t *testing.T) {
-	f := NewFunction("fn", t.Logf)
+	f := newTestFunction(t)
 	v1, _ := f.Publish(okHandler("v1"), RevisionConfig{}, map[RevisionID]int{"": 1}, 0)
 	epoch := f.Epoch()
 
