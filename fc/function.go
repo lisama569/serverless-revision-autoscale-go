@@ -3,6 +3,7 @@ package fc
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,7 @@ type Function struct {
 	weights   map[RevisionID]int
 	epoch     uint64
 	pools     map[RevisionID]*pool
+	rollout   *rolloutState // 进行中的渐进放量（nil 表示无）
 	rr        atomic.Uint64 // 确定性加权路由计数器
 	log       Logger
 	now       func() time.Time
@@ -79,6 +81,7 @@ func (f *Function) Publish(handler Handler, cfg RevisionConfig, weights map[Revi
 			}
 			final[k] = v
 		}
+		f.cancelRolloutLocked("publish with traffic")
 		if err := f.applyTrafficLocked(final); err != nil {
 			return "", err
 		}
@@ -94,6 +97,7 @@ func (f *Function) UpdateTraffic(weights map[RevisionID]int, expectedEpoch uint6
 	if err := f.checkEpochLocked(expectedEpoch); err != nil {
 		return err
 	}
+	f.cancelRolloutLocked("traffic update")
 	if err := f.applyTrafficLocked(weights); err != nil {
 		return err
 	}
@@ -112,6 +116,7 @@ func (f *Function) Rollback(to RevisionID, expectedEpoch uint64) error {
 		return newError(ErrKindUnknownRevision, "rollback target "+string(to)+" does not exist")
 	}
 	f.log("[function %s] rollback to %s", f.name, to)
+	f.cancelRolloutLocked("rollback")
 	if err := f.applyTrafficLocked(map[RevisionID]int{to: 1}); err != nil {
 		return err
 	}
@@ -174,6 +179,13 @@ func (f *Function) applyTrafficLocked(weights map[RevisionID]int) error {
 		}
 	}
 
+	// 持有流量的版本：预热保底常驻实例，避免第一个真实请求冷启动。
+	for id, w := range f.weights {
+		if w > 0 {
+			f.pools[id].ensureMin(f.revisions[id].Config.MinInstances)
+		}
+	}
+
 	// 失去流量的版本：在同一把锁下标记排空（与权重变更、流量恢复序列化），
 	// 再异步等待在途请求完成，不影响其他版本。
 	for id, p := range f.pools {
@@ -221,14 +233,29 @@ func pick(weights map[RevisionID]int, n uint64) RevisionID {
 	return RevisionID(ids[len(ids)-1])
 }
 
-// Invoke 按当前权重快照路由一次调用。
+// stickyPick 按业务路由键做确定性粘性选择：对键做 FNV-1a 哈希，
+// 在与 pick 相同的按 ID 排序展开的权重序列上定位。
+// 同一键在权重表不变时必落到同一版本；不依赖任何随机数，可稳定复现。
+func stickyPick(weights map[RevisionID]int, key string) RevisionID {
+	h := fnv.New64a()
+	h.Write([]byte(key))
+	return pick(weights, h.Sum64())
+}
+
+// Invoke 按当前权重快照路由一次调用；每次调用推进一次渐进放量节奏。
 func (f *Function) Invoke(ctx context.Context, req *Request) (*Response, error) {
+	f.tickRollout()
 	for attempt := 0; attempt < 8; attempt++ {
 		weights, pools := f.snapshot()
 		if len(weights) == 0 {
 			return nil, newError(ErrKindNoTraffic, "function "+f.name+" has no traffic configured")
 		}
-		id := pick(weights, f.rr.Add(1)-1)
+		var id RevisionID
+		if req.RoutingKey != "" {
+			id = stickyPick(weights, req.RoutingKey) // 粘性路由，不消耗轮转计数器
+		} else {
+			id = pick(weights, f.rr.Add(1)-1)
+		}
 		resp, err := pools[id].invoke(ctx, req)
 		if IsKind(err, ErrKindDraining) {
 			continue // 与并发流量切换竞争：按新快照重路由
@@ -241,11 +268,19 @@ func (f *Function) Invoke(ctx context.Context, req *Request) (*Response, error) 
 	return nil, newError(ErrKindDraining, "function "+f.name+" traffic is in transition")
 }
 
-// Tick 驱动缩容判定（回收空闲实例，可缩到零）。测试用注入时钟调用。
+// Tick 驱动缩容判定（回收空闲实例；无保底配置的版本可缩到零）。测试用注入时钟调用。
 func (f *Function) Tick() {
+	f.mu.Lock()
+	minKeep := make(map[RevisionID]int, len(f.pools))
+	for id := range f.pools {
+		if f.weights[id] > 0 {
+			minKeep[id] = f.revisions[id].Config.MinInstances
+		}
+	}
+	f.mu.Unlock()
 	_, pools := f.snapshot()
-	for _, p := range pools {
-		p.tick()
+	for id, p := range pools {
+		p.tick(minKeep[id])
 	}
 }
 

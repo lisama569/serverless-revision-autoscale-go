@@ -11,6 +11,9 @@ type RevisionID string
 // Request 是一次函数调用。
 type Request struct {
 	Payload string
+	// RoutingKey 是业务路由键：非空时按键做确定性粘性路由，
+	// 同一键在流量策略不变的前提下始终落到同一版本；为空时按权重轮转分配。
+	RoutingKey string
 }
 
 // Response 是函数调用的结果，Attribution 记录请求归因信息。
@@ -31,6 +34,10 @@ type RevisionConfig struct {
 	InvokeTimeout  time.Duration // 单次调用超时
 	DrainTimeout   time.Duration // 实例排空超时
 	IdleTimeout    time.Duration // 无流量缩容到零的空闲时长
+	// MinInstances 是保底常驻实例数：版本持有流量期间，即使空闲也保留
+	// 这么多实例（避免冷启动）；超出部分空闲后照常回收。默认 0，行为与之前一致。
+	// 版本失去流量进入排空时，保底实例一并回收。
+	MinInstances int
 }
 
 func (c RevisionConfig) withDefaults() RevisionConfig {
@@ -51,6 +58,12 @@ func (c RevisionConfig) withDefaults() RevisionConfig {
 	}
 	if c.IdleTimeout <= 0 {
 		c.IdleTimeout = 100 * time.Millisecond
+	}
+	if c.MinInstances < 0 {
+		c.MinInstances = 0
+	}
+	if c.MinInstances > c.MaxInstances {
+		c.MinInstances = c.MaxInstances
 	}
 	return c
 }

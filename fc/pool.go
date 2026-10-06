@@ -119,24 +119,56 @@ func (p *pool) tryGet() (in *instance, full bool, err error) {
 	return nil, true, nil
 }
 
-// tick 回收空闲超时的实例（可缩到零）。
-func (p *pool) tick() {
+// ensureMin 预热保底常驻实例：池未在排空且实例数不足 n 时补齐。
+// 在版本获得流量时调用，避免第一个真实请求撞上冷启动。
+func (p *pool) ensureMin(n int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.draining {
+		return
+	}
+	for len(p.instances) < n {
+		p.nextID++
+		in := newInstance(fmt.Sprintf("%s-i%d", p.rev.ID, p.nextID), p.rev, p.log, p.now)
+		p.instances = append(p.instances, in)
+		p.log("[pool %s] pre-warm: min-instances=%d, instances=%d", p.rev.ID, n, len(p.instances))
+	}
+}
+
+// tick 回收空闲超时的实例，但至少保留 minKeep 个（保底常驻，minKeep=0 即可缩到零）；
+// 实例数不足 minKeep 时补齐。
+func (p *pool) tick(minKeep int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.now()
-	keep := p.instances[:0]
+	// 先分出繁忙与空闲实例：繁忙的一律保留；空闲的只保留到保底数，其余回收。
+	var busy, idleList []*instance
 	for _, in := range p.instances {
 		in.mu.Lock()
 		idle := in.inflight == 0 && now.Sub(in.lastIdle) >= p.rev.Config.IdleTimeout
 		in.mu.Unlock()
 		if idle {
-			in.kill()
-			p.log("[pool %s] scale-down: reclaim %s, instances=%d", p.rev.ID, in.id, len(p.instances)-1)
+			idleList = append(idleList, in)
 		} else {
-			keep = append(keep, in)
+			busy = append(busy, in)
 		}
 	}
+	keep := append(p.instances[:0], busy...)
+	for _, in := range idleList {
+		if len(keep) < minKeep {
+			keep = append(keep, in) // 保底内的空闲实例保留
+			continue
+		}
+		in.kill()
+		p.log("[pool %s] scale-down: reclaim %s, instances=%d", p.rev.ID, in.id, len(p.instances)-1)
+	}
 	p.instances = keep
+	for len(p.instances) < minKeep && !p.draining {
+		p.nextID++
+		in := newInstance(fmt.Sprintf("%s-i%d", p.rev.ID, p.nextID), p.rev, p.log, p.now)
+		p.instances = append(p.instances, in)
+		p.log("[pool %s] pre-warm: min-instances=%d, instances=%d", p.rev.ID, minKeep, len(p.instances))
+	}
 	if len(p.instances) == 0 {
 		p.log("[pool %s] scaled to zero", p.rev.ID)
 	}
